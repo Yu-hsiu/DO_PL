@@ -1,0 +1,6 @@
+(+ 1 2)
+(cons 1 (cons 2 nil))
+(define x 10)
+(* x x)
+(if (> x 5) (quote big) (quote small))
+(exit)
