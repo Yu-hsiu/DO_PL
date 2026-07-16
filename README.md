@@ -1,4 +1,4 @@
-# OurScheme 直譯器(DO_PL)
+# OurScheme 編譯器(DO_PL)
 
 此程式為中原大學三下PL(程式語言)project 占分70% 分為 project1~4
 
