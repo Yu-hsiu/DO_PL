@@ -12,10 +12,10 @@
 不斷循環直到 `(exit)`。整個語言的「讀、懂、算、答」四件事,都在這一支程式裡自己實作。
 
 
-Project1為 基礎的運算能力及變數宣告\\
-Project2為 C語言文法的check\\
-Project3為 2的進階 除了確認文法的正確性還要加上運算能力及輸出答案\\
-Porject4為 3的進階 要加入Call function的能力
+Project1為 基礎的運算能力及變數宣告
+\\ Project2為 C語言文法的check
+\\ Project3為 2的進階 除了確認文法的正確性還要加上運算能力及輸出答案
+\\ Porject4為 3的進階 要加入Call function的能力
 
 ## 快速開始
 
