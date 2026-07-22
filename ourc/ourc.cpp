@@ -49,6 +49,7 @@ struct SyntaxError{ std::string msg; Token tok; SyntaxError(std::string m, Token
 struct SemError   { std::string msg; Token tok; SemError(std::string m, Token t):msg(std::move(m)),tok(std::move(t)){} };
 struct RunError   { std::string msg; int line; RunError(std::string m,int l):msg(std::move(m)),line(l){} };
 struct StopSignal {};   // Done()
+// ReturnSignal 定義於 Value 之後(需帶回傳值)
 
 // ===========================================================================
 // Lexer — on-demand, one-token lookahead
@@ -491,6 +492,8 @@ struct Var {
     Value scalar; std::vector<Value> arr;
 };
 
+struct ReturnSignal { Value v; };   // P4:return 帶回傳值,由 callUser 攔截
+
 static std::string fmt(const Value& v) {
     std::ostringstream o;
     switch (v.k) {
@@ -534,7 +537,7 @@ private:
         switch (n.k) {
             case Node::NULLSTMT: return;
             case Node::EXPRSTMT: eval(*n.kids[0]); return;
-            case Node::RET: if (!n.kids.empty()) eval(*n.kids[0]); return;   // top-level return: ignore
+            case Node::RET: { Value rv; if (!n.kids.empty()) rv=eval(*n.kids[0]); throw ReturnSignal{rv}; }
             case Node::BLOCK: { ScopeGuard g(this); for (auto& s : n.kids) exec(*s); return; }
             case Node::DECL: execDecl(n); return;
             case Node::FUNCDEF: {
@@ -683,8 +686,28 @@ private:
             return Value{};
         }
         if (fn=="ListFunction" || fn=="ListAllFunctions") { for (auto& f:mFuncs) std::cout << "函式 " << f.first << "\n"; return Value{}; }
-        if (mFuncs.count(fn)) throw RunError("函式呼叫 '"+fn+"()' 將於 P4 實作", n.tok.line);
+        if (mFuncs.count(fn)) return callUser(*mFuncs[fn], n);
         throw SemError("使用未宣告的 '"+fn+"'", n.tok);
+    }
+
+    // P4:使用者函式呼叫。C 語意——函式框架只見全域 + 自身參數/區域,看不到呼叫端區域變數。
+    Value callUser(Node& fn, Node& callNode) {
+        std::vector<Value> av;                             // 先在呼叫端作用域算好引數
+        for (auto& a : callNode.kids) av.push_back(eval(*a));
+        if (av.size()!=fn.params.size())
+            throw RunError("函式 '"+fn.name+"' 參數數量不符(需 "+std::to_string(fn.params.size())+" 個,給了 "+std::to_string(av.size())+" 個)", callNode.tok.line);
+        // ponytail: 傳值呼叫;grammar 的 '&' by-reference 尚未實作(P4 最小版)
+        std::vector<std::map<std::string,Var>> saved = std::move(mScopes);
+        mScopes.clear();
+        mScopes.push_back(std::move(saved[0]));            // 共享全域(變動保留)
+        mScopes.emplace_back();                           // 參數作用域
+        for (size_t k=0; k<fn.params.size(); ++k) { Var v; v.scalar=av[k]; mScopes.back()[fn.params[k]]=std::move(v); }
+        Value ret;                                         // 無 return → VOID
+        try { exec(*fn.kids[0]); }                         // 函式本體(BLOCK)
+        catch (const ReturnSignal& r) { ret=r.v; }
+        saved[0]=std::move(mScopes[0]);                    // 還原全域(保留本次呼叫對全域的變動)
+        mScopes=std::move(saved);
+        return ret;
     }
     void listAll() {
         for (auto it=mScopes.rbegin(); it!=mScopes.rend(); ++it)
@@ -711,18 +734,23 @@ int main() {
     Evaluator ev;
 
     int n=0, ok=0, lexErr=0, synErr=0, semErr=0, runErr=0;
+    std::vector<NP> keep;                        // 保住所有 AST 節點:函式定義存進 mFuncs,需活到整批結束
     for (;;) {
         try { if (p.atEof()) break; }
         catch (const LexError& e) { n++; std::cout << "第 " << n << " 句: 詞法錯誤 (第 " << e.line << " 行 無法辨識的字元 '" << e.ch << "')\n"; lexErr++; continue; }
         n++;
         try {
             NP node = p.unit();                 // parse (lexical/syntax errors here)
-            Value r = ev.execTop(*node);        // evaluate (semantic/runtime errors here)
+            Node* np = node.get();
+            keep.push_back(std::move(node));    // 保留擁有權(FUNCDEF 指標要一直有效)
+            Value r = ev.execTop(*np);          // evaluate (semantic/runtime errors here)
             if (r.k==Value::VOID) std::cout << "第 " << n << " 句: 接受\n";
             else std::cout << "第 " << n << " 句: => " << fmt(r) << "\n";
             ok++;
         } catch (const StopSignal&) {
             std::cout << "第 " << n << " 句: Done() — 結束\n"; ok++; break;
+        } catch (const ReturnSignal&) {          // 頂層 return:視為接受(靜默)
+            std::cout << "第 " << n << " 句: 接受\n"; ok++;
         } catch (const LexError& e) {
             std::cout << "第 " << n << " 句: 詞法錯誤 (第 " << e.line << " 行 無法辨識的字元 '" << e.ch << "')\n"; lexErr++;
         } catch (const SyntaxError& e) {

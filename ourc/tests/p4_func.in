@@ -1,0 +1,13 @@
+int sum(int n) { int s; s = 0; while (n > 0) { s = s + n; n = n - 1; } return s; }
+sum(5);
+int fact(int n) { if (n <= 1) return 1; return n * fact(n - 1); }
+fact(5);
+int add(int x, int y) { return x + y; }
+add(3, 4);
+add(1);
+fact(3) + sum(3);
+int g;
+g = 10;
+int useglobal() { return g + 1; }
+useglobal();
+Done();
