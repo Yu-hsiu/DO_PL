@@ -1,6 +1,8 @@
-// OurC P1 — 詞法 + 語法檢查器 (lexical + syntax checker)
-// 依 OurC grammar 2016-05-05 版實作:遞迴下降 parser + 錯誤兩分類(詞法/語法)。
-// 語意檢查(未宣告/重複宣告)屬 P2,本檔不含。
+// OurC P1+P2 — 詞法 + 語法 + 語意檢查器
+// 依 OurC grammar 2016-05-05 版:遞迴下降 parser + 錯誤三分類(詞法/語法/語意)。
+//   P1 詞法 + 語法;P2 符號表 + 作用域,檢查未宣告 / 重複宣告。
+// 語意檢查範圍:變數 / 函式使用前需宣告;同一作用域不可重複宣告。
+// (求值輸出屬 P3、函式呼叫堆疊屬 P4。)
 //
 // 用法:  ourc < input.in
 // 逐一讀取頂層 (definition | statement),每句印出「接受」或錯誤分類 + 行號;
@@ -10,6 +12,7 @@
 
 #include <cctype>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -40,7 +43,7 @@ struct Token {
 };
 
 // ---------------------------------------------------------------------------
-// Errors
+// Errors — 三分類
 // ---------------------------------------------------------------------------
 struct LexError {
     int line;
@@ -50,6 +53,11 @@ struct SyntaxError {
     std::string msg;
     Token tok;
     SyntaxError(std::string m, Token t) : msg(std::move(m)), tok(std::move(t)) {}
+};
+struct SemError {                 // 語意錯誤(未宣告 / 重複宣告)
+    std::string msg;
+    Token tok;
+    SemError(std::string m, Token t) : msg(std::move(m)), tok(std::move(t)) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -238,10 +246,16 @@ private:
 
 // ---------------------------------------------------------------------------
 // Parser — recursive descent over OurC grammar 2016-05-05
+//   附符號表(scope stack)做 P2 語意檢查。
 // ---------------------------------------------------------------------------
 class Parser {
 public:
-    explicit Parser(Lexer& lx) : mLx(lx) {}
+    explicit Parser(Lexer& lx) : mLx(lx) {
+        mScopes.emplace_back();                       // global scope
+        for (const char* b : {"Done", "ListVariable", "ListAllVariables",
+                              "ListFunction", "ListAllFunctions"})
+            mScopes.front().insert(b);                // 內建指令
+    }
 
     // one top-level unit: definition | statement
     void unit() {
@@ -252,9 +266,35 @@ public:
 
     bool atEof() { return mLx.atEof(); }
     void recover() { mLx.recover(); }
+    void resetToGlobal() { mScopes.resize(1); }       // 錯誤後把作用域堆疊還原到全域
 
 private:
     Lexer& mLx;
+    std::vector<std::set<std::string>> mScopes;        // 作用域堆疊(front = global)
+
+    // --- symbol table ------------------------------------------------------
+    void pushScope() { mScopes.emplace_back(); }
+    void popScope()  { if (mScopes.size() > 1) mScopes.pop_back(); }
+
+    // RAII:離開作用域(含例外)時自動 pop,保持堆疊平衡
+    struct ScopeGuard {
+        Parser* p;
+        explicit ScopeGuard(Parser* pp) : p(pp) { p->pushScope(); }
+        ~ScopeGuard() { p->popScope(); }
+        ScopeGuard(const ScopeGuard&) = delete;
+        ScopeGuard& operator=(const ScopeGuard&) = delete;
+    };
+
+    void declare(const Token& id) {
+        if (mScopes.back().count(id.text))
+            throw SemError("重複宣告 '" + id.text + "'", id);
+        mScopes.back().insert(id.text);
+    }
+    void useVar(const Token& id) {
+        for (auto it = mScopes.rbegin(); it != mScopes.rend(); ++it)
+            if (it->count(id.text)) return;
+        throw SemError("使用未宣告的 '" + id.text + "'", id);
+    }
 
     // --- token helpers -----------------------------------------------------
     static bool isTypeSpec(TokType t) {
@@ -272,20 +312,24 @@ private:
         if (mLx.peek().type == ty) { mLx.next(); return true; }
         return false;
     }
-    void expect(TokType ty, const char* what) {
-        if (mLx.peek().type != ty) throw SyntaxError(std::string("需要 ") + what, mLx.peek());
+    Token expect(TokType ty, const char* what) {       // 回傳被消耗的 token
+        Token t = mLx.peek();
+        if (t.type != ty) throw SyntaxError(std::string("需要 ") + what, t);
         mLx.next();
+        return t;
     }
 
     // --- definitions / declarations ---------------------------------------
     void definition() {
         if (accept(T_VOID)) {
-            expect(T_IDENT, "識別字");
+            Token id = expect(T_IDENT, "識別字");
+            declare(id);                               // void 函式名
             functionDefWithoutID();
             return;
         }
         typeSpecifier();
-        expect(T_IDENT, "識別字");
+        Token id = expect(T_IDENT, "識別字");
+        declare(id);                                   // 變數 / 函式名
         functionDefOrDeclarators();
     }
 
@@ -302,13 +346,15 @@ private:
     void restOfDeclarators() {
         if (accept(T_LBRACK)) { expect(T_CONST, "常數"); expect(T_RBRACK, "']'"); }
         while (accept(T_COMMA)) {
-            expect(T_IDENT, "識別字");
+            Token id = expect(T_IDENT, "識別字");
+            declare(id);                               // 逗號後的每個名字
             if (accept(T_LBRACK)) { expect(T_CONST, "常數"); expect(T_RBRACK, "']'"); }
         }
         expect(T_SEMI, "';'");
     }
 
     void functionDefWithoutID() {
+        ScopeGuard g(this);                            // 參數作用域
         expect(T_LPAREN, "'('");
         if (accept(T_VOID)) {
             // empty param list
@@ -323,7 +369,8 @@ private:
         auto oneParam = [&]() {
             typeSpecifier();
             accept(T_AMP);                    // optional '&'
-            expect(T_IDENT, "識別字");
+            Token id = expect(T_IDENT, "識別字");
+            declare(id);                                // 參數名進參數作用域
             if (accept(T_LBRACK)) { expect(T_CONST, "常數"); expect(T_RBRACK, "']'"); }
         };
         oneParam();
@@ -331,6 +378,7 @@ private:
     }
 
     void compound() {
+        ScopeGuard g(this);                            // 區塊作用域
         expect(T_LBRACE, "'{'");
         while (mLx.peek().type != T_RBRACE && mLx.peek().type != T_EOF) {
             if (isTypeSpec(mLx.peek().type)) declaration();
@@ -341,11 +389,12 @@ private:
 
     void declaration() {
         typeSpecifier();
-        expect(T_IDENT, "識別字");
+        Token id = expect(T_IDENT, "識別字");
+        declare(id);                                   // 區域變數
         restOfDeclarators();
     }
 
-    // --- statement (chunk3) -----------------------------------------------
+    // --- statement ---------------------------------------------------------
     void statement() {
         Token t = mLx.peek();
         if (t.type == T_SEMI) { mLx.next(); return; }        // null statement
@@ -381,15 +430,16 @@ private:
         throw SyntaxError("這裡不能放這個 token", t);
     }
 
-    // --- expression (chunk3) ----------------------------------------------
+    // --- expression --------------------------------------------------------
     void expression() { basicExpression(); while (accept(T_COMMA)) basicExpression(); }
 
     void basicExpression() {
         Token t = mLx.peek();
-        if (t.type == T_IDENT) { mLx.next(); restOfIdentStarted(); return; }
+        if (t.type == T_IDENT) { mLx.next(); useVar(t); restOfIdentStarted(); return; }
         if (t.type == T_PP || t.type == T_MM) {          // 前置 ++/-- 只能接 ID[索引]
             mLx.next();
-            expect(T_IDENT, "識別字");
+            Token id = expect(T_IDENT, "識別字");
+            useVar(id);
             if (accept(T_LBRACK)) { expression(); expect(T_RBRACK, "']'"); }
             romceAndRomloe();
             return;
@@ -429,7 +479,7 @@ private:
     void signedUnaryExp() {
         Token t = mLx.peek();
         if (t.type == T_IDENT) {
-            mLx.next();
+            mLx.next(); useVar(t);
             if (accept(T_LPAREN)) {
                 if (startsExpr(mLx.peek().type)) actualParamList();
                 expect(T_RPAREN, "')'");
@@ -447,7 +497,7 @@ private:
     void unsignedUnaryExp() {
         Token t = mLx.peek();
         if (t.type == T_IDENT) {
-            mLx.next();
+            mLx.next(); useVar(t);
             if (accept(T_LPAREN)) {
                 if (startsExpr(mLx.peek().type)) actualParamList();
                 expect(T_RPAREN, "')'");
@@ -472,7 +522,8 @@ private:
         }
         if (t.type == T_PP || t.type == T_MM) {
             mLx.next();
-            expect(T_IDENT, "識別字");
+            Token id = expect(T_IDENT, "識別字");
+            useVar(id);
             if (accept(T_LBRACK)) { expression(); expect(T_RBRACK, "']'"); }
             return;
         }
@@ -552,7 +603,7 @@ int main() {
     Lexer lx(src);
     Parser p(lx);
 
-    int n = 0, ok = 0, lexErr = 0, synErr = 0;
+    int n = 0, ok = 0, lexErr = 0, synErr = 0, semErr = 0;
     for (;;) {
         // Guarded EOF check: a bad char at a unit boundary must be reported,
         // not crash the loop condition. The offending char is already consumed
@@ -576,15 +627,24 @@ int main() {
             std::cout << "第 " << n << " 句: 詞法錯誤 (第 " << e.line
                       << " 行 無法辨識的字元 '" << e.ch << "')\n";
             lexErr++;
+            p.resetToGlobal();
         } catch (const SyntaxError& e) {
             std::cout << "第 " << n << " 句: 語法錯誤 (第 " << e.tok.line
                       << " 行 " << e.msg << ", 出現 '"
                       << (e.tok.type == T_EOF ? std::string("<EOF>") : e.tok.text) << "')\n";
             synErr++;
             p.recover();
+            p.resetToGlobal();
+        } catch (const SemError& e) {
+            std::cout << "第 " << n << " 句: 語意錯誤 (第 " << e.tok.line
+                      << " 行 " << e.msg << ")\n";
+            semErr++;
+            p.recover();
+            p.resetToGlobal();
         }
     }
     std::cout << "----\n總計 " << n << " 句:接受 " << ok
-              << "、詞法錯 " << lexErr << "、語法錯 " << synErr << "\n";
+              << "、詞法錯 " << lexErr << "、語法錯 " << synErr
+              << "、語意錯 " << semErr << "\n";
     return 0;
 }
