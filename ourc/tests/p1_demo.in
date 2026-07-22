@@ -1,0 +1,11 @@
+int a;
+int b, c, d;
+float x[10];
+int arr[5], y;
+a = 5;
+a = b + c * d;
+x[0] = 3.14;
+if (a > b) a = b; else a = c;
+while (a < 10) a = a + 1;
+int sum(int n) { int s; s = 0; while (n > 0) { s = s + n; n = n - 1; } return s; }
+do a = a - 1; while (a > 0);
